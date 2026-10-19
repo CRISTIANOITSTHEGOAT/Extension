@@ -17,7 +17,7 @@ It's a Chrome/Edge browser extension plus a small local bridge that connects the
 1. **Download the Bridge** from the [GitHub releases page](https://github.com/sebattfg/ZeroScript-Free)
 2. **Open Roblox Studio** and load a Place
 3. **Enable the MCP server in Roblox Studio** (first time only): click **Assistant AI** in the top bar, then **...** > **Manage MCP Servers** > **Enable Studio as MCP Server**
-4. **Run the Bridge** - double-click `start.bat` (Windows) or `MacOS_Start.command` (macOS); a small window opens, the Bridge is running. On macOS, the first launch shows a Gatekeeper warning (normal for any downloaded script): click **Done**, then **System Settings > Privacy & Security**, scroll down, and click **Open Anyway**.
+4. **Run the Bridge** - double-click `start.bat` (Windows) or `MacOS_Start.command` (macOS); a small window opens, the Bridge is running. On macOS, the first launch shows a Gatekeeper warning (normal for any downloaded script): click **Done**, then **System Settings > Privacy & Security**, scroll down, and click **Open Anyway**. The Bridge listens on `ws://127.0.0.1:17613`. If that port is already taken (or you start it with `set ZS_BRIDGE_PORT=17614`), the popup's **Bridge port** box points the extension at the right one; left on automatic, it scans 17613-17616 and remembers whichever port answers.
 5. **Go to https://chat.deepseek.com** (recommended), https://chatgpt.com, https://gemini.google.com, https://www.kimi.com, https://chat.z.ai, https://chat.qwen.ai, https://arena.ai (or https://lmarena.ai, the same app under its old name), or https://www.meta.ai, open a new chat (only works on these exact addresses; on Arena use Direct mode)
 6. Click **Start session** in the ZeroScript panel
 7. Type what you want to build
@@ -54,7 +54,10 @@ providers/arena.js    same interface for Arena / arena.ai and LM Arena / lmarena
                       auto-commit, Direct-mode gate, Stop-button end of turn) (global ZSProvider)
 providers/meta.js     same interface for Meta AI / meta.ai (React DOM, textarea
                       composer, JSON-viewer + code-collapse masking)   (global ZSProvider)
-background.js         WebSocket to the local bridge (provider-agnostic)
+background.js         WebSocket to the local bridge (provider-agnostic):
+                      connects only while a supported AI tab/popup needs it,
+                      backs off and pauses instead of spamming refused
+                      connections, discovers custom bridge ports
 ```
 
 The other half lives in the Bridge (one folder up): `bridge.py` serves the
@@ -120,6 +123,12 @@ Smoke tests (plain Node, no dependencies - run them from this directory):
   controllable clock: Arena's Stop-button end of turn (including the case where
   the text is still growing), the lmarena.ai route handling, the DOM-change wait
   in `core/main.js` (no flat sleeps), and the parallel read-only batch.
+- `node test-bridge.js` - the bridge connection, against stub `chrome` /
+  `WebSocket` globals and a controllable clock: no socket is opened without a
+  supported AI tab, refused default ports scan upward (17613 → 17616), a
+  saved port wins, only real bridge protocol frames are trusted, and a missing
+  bridge backs off to one quiet probe a minute instead of an endless
+  `ERR_CONNECTION_REFUSED` loop.
 
 All of them print `PASS`/`FAIL` per case and exit non-zero on failure. The
 Bridge and the Dev Kit are covered by Python tests one folder up

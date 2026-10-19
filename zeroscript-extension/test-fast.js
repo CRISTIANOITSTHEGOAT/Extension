@@ -224,3 +224,31 @@ ok("the Arena provider ends a turn on the button going away",
     ok("the write still comes first", JSON.stringify(w.calls) === '["script_write","script_read"]');
   })();
 }
+
+// ── Arena's send path: click the moment the composer is ready ──────────────
+// typeAndSend used to enter a 60s `waitFor(sendReady)` even when the button
+// was ALREADY enabled, then confirm the send with up to six 700ms waits. The
+// fast path checks synchronously, clicks, and confirms against the textarea
+// clearing - so an ordinary send costs no timer at all.
+{
+  global.Event = class { constructor(t, o) { this.type = t; Object.assign(this, o || {}); } };
+  global.KeyboardEvent = global.Event;
+  editor.value = "";
+  editor.dispatchEvent = () => {};
+  global.window.HTMLTextAreaElement = function HTMLTextAreaElement() {};
+
+  let clicked = 0, textAtClick = "";
+  const send = mkButton("Send message");
+  send.click = () => { clicked++; textAtClick = editor.value; editor.value = ""; };
+  setButtons([send]);
+
+  (async () => {
+    const t0 = Date.now();
+    await P.typeAndSend("hello from the fast path", null);
+    const ms = Date.now() - t0;
+    ok("Arena sends without waiting when the button is already enabled", clicked === 1);
+    ok("Arena types the whole message before clicking", textAtClick === "hello from the fast path");
+    ok("Arena treats the cleared composer as a confirmed send", editor.value === "");
+    ok("a ready composer needs no poll interval", ms < 250);
+  })();
+}

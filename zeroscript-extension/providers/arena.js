@@ -117,8 +117,10 @@ const ZSProvider = (() => {
     // How long the DOM is given to settle after the reply stopped changing.
     // The core's watcher wakes on DOM changes, so this only has to cover the
     // tail of the final render - the old flat 500ms was a full poll interval
-    // of dead time on every single turn.
-    SETTLE_MS: 220,
+    // of dead time on every single turn. Arena's Stop button already tells us
+    // the generation ended, and its final .prose render lands in the same
+    // commit, so 140ms is enough to catch a late control/copy-bar repaint.
+    SETTLE_MS: 140,
   };
 
   // ── Turn classification ───────────────────────────────────────────────────
@@ -457,7 +459,7 @@ const ZSProvider = (() => {
       if (pred()) return true;
       const left = timeout - (Date.now() - t0);
       if (left <= 0) break;
-      await waitTick(Math.min(120, left));
+      await waitTick(Math.min(80, left));
     }
     return false;
   }
@@ -527,8 +529,17 @@ const ZSProvider = (() => {
       const b = sendButton();
       return !!b && !b.disabled && b.getAttribute("aria-disabled") !== "true";
     };
-    const ready1 = await waitFor(sendReady, 60000);
-    diag("arena.tas.ready", { ready: ready1 });
+    // FAST PATH: React normally enables the send button in the same tick as
+    // the input event, so check synchronously and click immediately instead
+    // of always entering a wait loop (even one that returns on the first
+    // check, it still added an async round trip to every single send). Only
+    // genuinely slow renders pay the wait, and its window no longer stretches
+    // to a full minute - in Direct mode (the only supported one) the button
+    // is either ready in a frame or the tab/composer is wedged, in which case
+    // waiting 60s just hid the problem.
+    const ready0 = sendReady();
+    const ready1 = ready0 || await waitFor(sendReady, 20000);
+    diag("arena.tas.ready", { ready: ready1, immediate: ready0 });
     // Attach LAST, right before the send - see gemini.js for why. Guard against
     // the core's up-to-4 typeAndSend retries (same `images` array ref): skip when
     // this exact set was already staged (identity match), and drop any stale
@@ -548,8 +559,14 @@ const ZSProvider = (() => {
     // Click and CONFIRM the send took (editor clears the instant Arena accepts
     // it, image AND text paths). Re-click until it clears so a single swallowed
     // click can't strand the message/attachment. No re-attach here.
+    // Confirm the send by the editor CLEARING (Arena's own acceptance signal).
+    // The first wait is longer than the retries: a click that was accepted
+    // needs a frame for React to empty the textarea, while a re-click on an
+    // already-cleared editor resolves on the first (synchronous) check. Five
+    // short attempts replace six 700ms ones, so a swallowed click is retried
+    // in well under a second instead of costing up to 4.2s.
     let sent = false;
-    for (let i = 0; i < 6 && !sent; i++) {
+    for (let i = 0; i < 5 && !sent; i++) {
       if (sendReady()) {
         try { sendButton().click(); } catch {}
       } else if (!isHardGenerating()) {
@@ -557,7 +574,7 @@ const ZSProvider = (() => {
         editor.dispatchEvent(new KeyboardEvent("keydown", o));
         editor.dispatchEvent(new KeyboardEvent("keyup", o));
       }
-      sent = await waitFor(() => editorText().trim() === "", 700);
+      sent = await waitFor(() => editorText().trim() === "", i === 0 ? 500 : 320);
     }
     diag("arena.tas.sent", { sent, editorLen: editorText().length, pendingAfterSend: pendingCount() });
   }
@@ -582,7 +599,7 @@ const ZSProvider = (() => {
       // there's no stop button AND no grown text yet, so genActive() is false -
       // the very window we must keep polling through.
       if (Date.now() - t0 > 8000) { clearInterval(_stopPoll); _stopPoll = null; }
-    }, 120);
+    }, 80);
   }
 
   // ── Chat-mode gate (Direct only) ──────────────────────────────────────────

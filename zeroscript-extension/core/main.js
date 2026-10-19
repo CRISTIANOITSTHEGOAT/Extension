@@ -336,18 +336,31 @@
       // generating stream shows growth (or the provider still reports "busy")
       // → fall back to the full idle wait, which is also what keeps a tool
       // result from being injected into a reply that is still being written.
+      // The paint only has to be awaited when there is actually something in
+      // flight. On the common path (the previous reply is finished) the old
+      // unconditional nextPaint() burned two frames - or the 120ms fallback on
+      // a background tab - before every single send, for a signal we already
+      // had synchronously.
+      const _strictBusy = typeof P.isBusyNow === "function" ? P.isBusyNow() : P.isGenerating();
       const _settleItem = P.lastAssistant();
       const _settleLen0 = _settleItem ? P.streamLen(_settleItem) : 0;
-      await nextPaint();
-      const _grew = _settleItem && _settleItem === P.lastAssistant() &&
-        P.streamLen(_settleItem) > _settleLen0;
+      let _grew = false;
+      if (_strictBusy || P.isGenerating()) {
+        await nextPaint();
+        _grew = _settleItem && _settleItem === P.lastAssistant() &&
+          P.streamLen(_settleItem) > _settleLen0;
+      }
       // isBusyNow() is the STRICT "is a generation happening RIGHT NOW" gate
       // (a visible stop button, a spinner); isGenerating() also LINGERS for a
       // moment after the answer ends, so it must not decide whether to wait -
-      // only whether the generation is over.
-      const _busy = typeof P.isBusyNow === "function" ? P.isBusyNow() : P.isGenerating();
-      if (_grew || _busy) {
+      // only whether the generation is over. A growth seen across the paint
+      // still gets a short settle, but never the full 2.5s busy window.
+      const _busy = _strictBusy ||
+        (typeof P.isBusyNow === "function" ? P.isBusyNow() : P.isGenerating());
+      if (_busy) {
         await waitFor(() => !P.isGenerating(), 2500);
+      } else if (_grew) {
+        await waitFor(() => !P.isGenerating(), 1200);
       }
       const base = P.assistantCount();
       const preUser = P.userCount();
@@ -2806,6 +2819,23 @@
     function onActionClick() {
       const kind = actionBtn.dataset.kind;
       if (kind === "start" || kind === "start-degraded") startSession();
+      // The bridge is offline with no session running: the bar's primary action
+      // becomes a one-click retry instead of a dead, disabled Start button.
+      // The worker auto-pauses after a few refused attempts; this is the
+      // gesture that resumes it immediately (and re-scans the port range).
+      if (kind === "retry") {
+        const btn = actionBtn;
+        btn.disabled = true;
+        btn.textContent = "Connecting…";
+        bg({ type: "reconnect" }).then((r) => {
+          setTimeout(() => {
+            if (!btn.isConnected) return;
+            btn.disabled = false;
+            renderBar();
+          }, 1200);
+          if (r && r.ok) toast(`Retrying the bridge on port ${r.port}…`);
+        });
+      }
     }
 
     // ── Custom prompt (persisted) ───────────────────────────────────────────
@@ -3253,7 +3283,7 @@
           // without this check the bridge dropping fell through to the
           // stale "N tools" text below, reading as if nothing was wrong.
           toneClass = "warn"; warn = true;
-          msg = `<b>Agent active</b> · bridge offline, run start.bat`;
+          msg = `<b>Agent active</b> · bridge offline on port ${(A.bridge && A.bridge.port) || 17613}, run start.bat`;
         } else if ((placeDown || appDown || studioDown) && addonOk) {
           // DEGRADED session by CHOICE: the user started the agent with Roblox
           // down but other MCP server(s) alive (the "Start agent (Roblox
@@ -3302,11 +3332,17 @@
               ? `<b>Studio open but not connected</b> - open <b>Assistant Settings &gt; MCP Servers</b> in Studio, or start without it.`
               : `<b>Roblox Studio offline</b> - start with your other MCP server(s).`;
           label = "▶︎ Start agent (Roblox offline)"; kind = "start-degraded";
+        } else if (!A.bridge.connected) {
+          // No bridge at all: Start cannot work, so give the user the action
+          // that can - retry the connection. The worker names the port it is
+          // trying in its status, so "wrong port" is fixable from the popup.
+          toneClass = "warn"; warn = true;
+          const port = (A.bridge && A.bridge.port) || 17613;
+          msg = `Run <b>start.bat</b>, then retry (port ${port}).`;
+          label = "↻ Retry bridge"; kind = "retry";
         } else {
           toneClass = "warn"; warn = true;
-          msg = !A.bridge.connected
-            ? `Run <b>start.bat</b> on your PC.`
-            : placeDown
+          msg = placeDown
               ? `Open a <b>place</b> in Roblox Studio.`
               : (appDown || studioDown) && studioProcUp
                 ? `Studio is open but not connected - open <b>Assistant Settings &gt; MCP Servers</b> in Studio.`
@@ -3317,7 +3353,8 @@
                     : `Open <b>Roblox Studio</b> for the tools.`;
           label = "▶︎ Start Roblox agent"; kind = "start";
         }
-        disabled = !bridgeOk && !addonOk;
+        // A retry is always clickable; Start still requires a usable server.
+        disabled = !bridgeOk && !addonOk && kind !== "retry";
       } else {
         toneClass = "noagent";
         msg = `No agent here. Open a new chat to start one.`;
@@ -3428,7 +3465,16 @@
       // Assistant Settings > MCP Servers inside the already-open Studio.
       const procUp = s.studioProc === true;
       let txt;
-      if (!s.connected) txt = "Bridge offline, run start.bat";
+      if (!s.connected) {
+        // Name the endpoint the worker is actually trying. "Bridge offline"
+        // alone sent users to restart a bridge that was already running - on
+        // another port (bridge.py honours ZS_BRIDGE_PORT). The port box in the
+        // popup fixes it; this text says which one to set.
+        const port = s.port || 17613;
+        txt = s.autoPaused
+          ? `Bridge offline on 127.0.0.1:${port} - run start.bat, then click Reconnect`
+          : `Bridge offline on 127.0.0.1:${port} - run start.bat (retrying automatically)`;
+      }
       else if (!mcpOk) txt = "Bridge OK, open Roblox Studio";
       else if (noPlace) txt = "Roblox Studio is open but no place is loaded - open a place";
       else if (noApp) txt = procUp
@@ -3501,8 +3547,24 @@
         : "";
       b.innerHTML = `<div class="zs-banner-t">⚠ Lost connection to ZeroScript</div>
         <div class="zs-banner-m">The ZeroScript bridge stopped on your PC. Restart it (run start.bat and keep Roblox Studio open): the agent will reconnect automatically as soon as it is detected again.</div>
-        <div class="zs-banner-acts">${videoLink}<button class="zs-banner-x">Close</button></div>`;
+        <div class="zs-banner-acts">${videoLink}<button class="zs-banner-reconnect">↻ Reconnect</button><button class="zs-banner-x">Close</button></div>`;
       b.querySelector(".zs-banner-x").addEventListener("click", () => { b.remove(); if (bridgeBannerEl === b) bridgeBannerEl = null; });
+      // One-click retry: the worker auto-pauses after a few refused attempts
+      // (so Chrome's console isn't flooded), and this is the gesture that
+      // resumes it without reloading the page.
+      const rb = b.querySelector(".zs-banner-reconnect");
+      rb.addEventListener("click", () => {
+        rb.disabled = true;
+        rb.textContent = "Connecting…";
+        bg({ type: "reconnect" }).then((r) => {
+          setTimeout(() => {
+            if (!rb.isConnected) return;
+            rb.disabled = false;
+            rb.textContent = "↻ Reconnect";
+          }, 1600);
+          if (r && r.ok) toast(`Retrying the bridge on port ${r.port}…`);
+        });
+      });
       root.appendChild(b);
       bridgeBannerEl = b;
     }
